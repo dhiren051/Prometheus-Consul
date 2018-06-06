@@ -1,0 +1,191 @@
+# Prometheus-Consul
+Prometheus integration with Consul
+
+With below configurations able to set alerts and get notifications at pagerduty : 
+ 
+prometheus.yml: 
+ 
+global:
+  scrape_interval: 15s
+  scrape_timeout: 15s
+  evaluation_interval: 30s
+rule_files:
+  - '/root/prometheus/prometheus-2.2.0-rc.1.linux-amd64/rules1_mem.yml'
+  - '/root/prometheus/prometheus-2.2.0-rc.1.linux-amd64/rules2_diskusage.yml'
+  - '/root/prometheus/prometheus-2.2.0-rc.1.linux-amd64/rules3_cpu.yml'
+  - '/root/prometheus/prometheus-2.2.0-rc.1.linux-amd64/rules4_servicehealth.yml'
+alerting:
+  alertmanagers:
+  - static_configs:
+    - targets:
+      - localhost:9093
+scrape_configs:
+- job_name: prometheus
+  metrics_path: /metrics
+  scheme: http
+  static_configs:
+  - targets:
+    - localhost:9090
+- job_name: node
+  metrics_path: /metrics
+  scheme: http
+  static_configs:
+  - targets:
+    - localhost:9100
+  relabel_configs:
+  - source_labels: [__address__]
+    separator: ;
+    regex: ([^:]+):.*
+    target_label: instance
+    replacement: ${1}
+    action: replace
+- job_name: consul-server
+  consul_sd_configs:
+   - server: 'ConsulServer:8500'
+     datacenter: ID
+     scheme: http
+  relabel_configs:
+  - source_labels: [__meta_consul_node]
+    target_label: __address__
+    replacement: ${1}:9100
+  - source_labels: [__meta_consul_tags]
+    regex: .*none.*
+    action: drop
+  - source_labels: [__meta_consul_service]
+    target_label: service_name
+  - source_labels: [__meta_consul_service_id]
+    target_label: service_id
+ 
+ 
+Rules:
+rules1_mem.yml
+ 
+groups:
+- name: mem_node_thresholds
+  rules:
+  - alert: mem_threshold_exceeded
+    expr: (((node_memory_MemTotal-node_memory_MemFree-node_memory_Cached{job="consul-server"})/(node_memory_MemTotal{job="consul-server"})*100)) > 95
+    for: 60s
+    labels:
+      severity: Critical
+    annotations:
+      description:  Instance {{ $labels.instance }} of service {{ $labels.service_name }} - Memory usage is above threshold value of 95%  with a current value of {{ $value }}.
+      summary: Instance {{ $labels.instance }} - High memory usage detected.
+ 
+rules2_diskusage.yml
+groups:
+- name: DiskUsage_node_thresholds
+  rules:
+  - alert: DiskUsage_threshold_exceeded
+    expr: node_filesystem_avail{job="consul-server",fstype="rootfs",mountpoint="/"} / node_filesystem_size{job="consul-server",fstype="rootfs",mountpoint="/"} * 100 > 80
+    for: 75s
+    labels:
+      severity: Critical
+    annotations:
+      description: Instance {{ $labels.instance }} of service {{ $labels.service_name }} - Disk usage is above 80% with a current value of {{ $value }}.
+      summary: Instance {{ $labels.instance }} - Low data disk space.
+ 
+rules3_cpu.yml
+ 
+groups:
+- name: cpu_node_thresholds
+  rules:
+  - alert: cpu_threshold_exceeded
+    expr: (100 - (avg by(instance) (rate(node_cpu{job="consul-server",mode="idle"}[2m])) * 100)) > 95
+    for: 90s
+    labels:
+      severity: Critical
+    annotations:
+      description: Instance {{ $labels.instance }} of service {{ $labels.service_name }} - CPU usage is above threshold value of 95% with a current value of {{ $value }}.
+      summary: Instance {{ $labels.instance }} -  High CPU usage detected.
+ 
+rules4_servicehealth.yml
+groups:
+- name: consulhealth
+  rules:
+  - alert: ConsulServiceDown
+    expr: "up{job=\"consul-server\"} == 0"
+    for: 45s
+    labels:
+      severity: Critical
+    annotations:
+      description: '{{ $labels.instance }} with service {{ $labels.servicename }} is down.'
+      summary: "Service on {{ $labels.instance }} is down."
+ 
+ 
+alertmanager.yml:
+ 
+---
+global:
+  smtp_smarthost: 'localhost:25'
+  smtp_from: 'emailid@domain.com'
+  smtp_require_tls: false
+ 
+route:
+  group_by: ['alertname','service_name','instance','job']
+  group_interval: 3m
+  group_wait: 15s
+  repeat_interval: 8757h
+  receiver: default
+  routes:
+  - match:
+      alertname: ConsulServiceDown
+    receiver: consul_pd_email_router
+    #group_by: ['service_name']
+  - match:
+      alertname: cpu_threshold_exceeded
+    receiver: cpu_utilization
+  - match:
+      alertname: mem_threshold_exceeded
+    receiver: memory_utilization
+  - match:
+      alertname: DiskUsage_threshold_exceeded
+    receiver: disk_utilization
+ 
+receivers:
+- name: default
+  email_configs:
+  - to: "emailid@domain.com"
+ 
+- name: consul_pd_email_router
+  email_configs:
+  - to: "{{ .GroupLabels.service_name }}_prometheus@pagerduty"
+    send_resolved: true
+    from: emailid@domain.com
+ 
+- name: cpu_utilization
+  email_configs:
+  - to: "cpu_services@pagerduty"
+    send_resolved: true
+    from: emailid@domain.com
+ 
+- name: memory_utilization
+  email_configs:
+  - to: "memory_services@pagerduty"
+    send_resolved: true
+    from: emailid@domain.com
+ 
+- name: disk_utilization
+  email_configs:
+  - to: "disk_services@pagerduty"
+    send_resolved: true
+    from: emailid@domain.com
+ 
+ 
+ 
+Commands to execute Prometheus: 
+nohup ./prometheus --web.enable-admin-api --web.enable-lifecycle --config.file=prometheus.yml &
+nohup ./node_exporter &
+nohup ./alertmanager --config.file=alertmanager.yml &
+ 
+Commands to reload after any config changes: 
+# To reload Prometheus:
+curl -X POST  http://localhost:9090/-/reload
+check changes at: http://localhost:9090/config
+ 
+# To reload alertmanager:
+curl -X POST  http://localhost:9093/-/reload
+check changes at :   http://localhost:9093/#/status
+ 
+ 
+ 
